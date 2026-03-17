@@ -27,7 +27,8 @@ extension Repository {
         // ── Step 2: read FETCH_HEAD ──────────────────────────────────────────
         // git writes the fetched commit OID as the first field (tab-delimited)
         // of the first line of .git/FETCH_HEAD immediately after a fetch.
-        let fetchHeadURL = workingDirectory
+        let workDir = try workingDirectory
+        let fetchHeadURL = workDir
             .appendingPathComponent(".git")
             .appendingPathComponent("FETCH_HEAD")
 
@@ -45,7 +46,7 @@ extension Repository {
         // ── Step 3: parse OID ────────────────────────────────────────────────
         var rawOID = git_oid()
         guard git_oid_fromstr(&rawOID, oidHex) == 0 else {
-            throw SwiftGitXError(code: .invalidArgument, category: .fetchHead,
+            throw SwiftGitXError(code: .invalidSpec, category: .fetchHead,
                                  message: "Invalid OID in FETCH_HEAD: \(oidHex)")
         }
 
@@ -61,12 +62,15 @@ extension Repository {
         var analysis   = GIT_MERGE_ANALYSIS_NONE
         var preference = GIT_MERGE_PREFERENCE_NONE
 
-        // Pass a single-element "array" of annotated commit pointers.
-        // UnsafePointer<OpaquePointer> maps to const git_annotated_commit ** in C.
-        try withUnsafePointer(to: annotatedCommit) { theirHeads in
-            try git(operation: .fetch) {
-                git_merge_analysis(&analysis, &preference, pointer, theirHeads, 1)
-            }
+        // git_merge_analysis expects UnsafeMutablePointer<OpaquePointer?>.
+        // Wrap in Optional so the pointer type matches const git_annotated_commit **.
+        var theirHead: OpaquePointer? = annotatedCommit
+        let analysisStatus = withUnsafeMutablePointer(to: &theirHead) { ptr in
+            git_merge_analysis(&analysis, &preference, pointer, ptr, 1)
+        }
+        guard analysisStatus == 0 else {
+            throw SwiftGitXError(code: .error, category: .merge,
+                                 message: "Merge analysis failed.")
         }
 
         // ── Step 6: act on analysis result ───────────────────────────────────
@@ -117,7 +121,7 @@ extension Repository {
         var mutableOID = targetOID
         guard git_reference_set_target(&updatedRefPtr, headRef, &mutableOID,
                                        "pull: Fast-forward") == 0 else {
-            throw SwiftGitXError(code: .generic, category: .reference,
+            throw SwiftGitXError(code: .error, category: .reference,
                                  message: "Could not update branch reference after fast-forward.")
         }
         if let updated = updatedRefPtr { git_reference_free(updated) }
