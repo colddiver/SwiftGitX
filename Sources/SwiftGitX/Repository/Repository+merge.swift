@@ -2,15 +2,17 @@
 //  Repository+merge.swift
 //  SwiftGitX
 //
-//  Fast-forward pull: fetch + merge analysis + GIT_CHECKOUT_SAFE tree checkout
-//  + branch ref update.  Added to support PHPDevKit's git pull feature since the
-//  upstream SwiftGitX library has merge marked TODO.
+//  Fast-forward pull + ahead/behind graph computation.
+//  Added to support PHPDevKit's git pull feature since the upstream SwiftGitX
+//  library has merge marked TODO.
 //
 
 import libgit2
 import Foundation
 
 extension Repository {
+
+    // MARK: - Pull (fetch + fast-forward merge)
 
     /// Fetches from the remote and fast-forwards the current branch if possible.
     ///
@@ -125,5 +127,42 @@ extension Repository {
                                  message: "Could not update branch reference after fast-forward.")
         }
         if let updated = updatedRefPtr { git_reference_free(updated) }
+    }
+
+    // MARK: - Ahead / Behind
+
+    /// Returns how many commits the current branch is ahead of and behind its
+    /// upstream (remote tracking) branch.
+    ///
+    /// Returns `(0, 0)` when there is no upstream configured or the repository
+    /// is empty.
+    public func aheadBehind() -> (ahead: Int, behind: Int) {
+        // Get the HEAD reference (resolves to the current branch tip).
+        var headRefPtr: OpaquePointer?
+        guard git_repository_head(&headRefPtr, pointer) == 0,
+              let headRef = headRefPtr else { return (0, 0) }
+        defer { git_reference_free(headRef) }
+
+        // Resolve HEAD to its target OID.
+        guard let localOIDPtr = git_reference_target(headRef) else { return (0, 0) }
+        let localOID = localOIDPtr.pointee
+
+        // Look up the upstream (remote tracking) branch for the current branch.
+        var upstreamRefPtr: OpaquePointer?
+        guard git_branch_upstream(&upstreamRefPtr, headRef) == 0,
+              let upstreamRef = upstreamRefPtr else { return (0, 0) }
+        defer { git_reference_free(upstreamRef) }
+
+        guard let upstreamOIDPtr = git_reference_target(upstreamRef) else { return (0, 0) }
+        let upstreamOID = upstreamOIDPtr.pointee
+
+        // Compute graph distance between the two tips.
+        var ahead  = 0
+        var behind = 0
+        var localCopy    = localOID
+        var upstreamCopy = upstreamOID
+        guard git_graph_ahead_behind(&ahead, &behind, pointer,
+                                     &localCopy, &upstreamCopy) == 0 else { return (0, 0) }
+        return (ahead, behind)
     }
 }
