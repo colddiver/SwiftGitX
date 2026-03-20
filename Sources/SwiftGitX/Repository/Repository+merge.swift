@@ -129,6 +129,64 @@ extension Repository {
         if let updated = updatedRefPtr { git_reference_free(updated) }
     }
 
+    // MARK: - Fetch Head OID
+
+    /// Returns the OID recorded in `.git/FETCH_HEAD` after a fetch, or `nil` if unavailable.
+    /// Used by conflict resolution to locate the incoming commit without a second network fetch.
+    public func fetchHeadOID() -> OID? {
+        guard let workDir = try? workingDirectory else { return nil }
+        let url = workDir.appendingPathComponent(".git/FETCH_HEAD")
+        guard
+            let content   = try? String(contentsOf: url, encoding: .utf8),
+            let firstLine = content.components(separatedBy: "\n").first,
+            let oidHex    = firstLine.components(separatedBy: "\t").first?
+                                     .trimmingCharacters(in: .whitespaces),
+            oidHex.count == 40
+        else { return nil }
+        return try? OID(hex: oidHex)
+    }
+
+    // MARK: - Force Fast-Forward (used after conflict resolution)
+
+    /// Fast-forwards HEAD to `targetOID` using `GIT_CHECKOUT_FORCE`.
+    ///
+    /// Call this after conflict resolution: the caller has pre-written the "theirs"
+    /// blob for each conflicting file so those files no longer block checkout, then
+    /// writes the merged result on top once HEAD is advanced.
+    public func forceFastForward(to targetOID: OID) throws(SwiftGitXError) {
+        let commitPtr = try ObjectFactory.lookupObjectPointer(
+            oid: targetOID.raw,
+            type: GIT_OBJECT_COMMIT,
+            repositoryPointer: pointer
+        )
+        defer { git_object_free(commitPtr) }
+
+        var checkoutOpts = git_checkout_options()
+        git_checkout_options_init(&checkoutOpts, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+        checkoutOpts.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue
+
+        try git(operation: .checkout) {
+            git_checkout_tree(pointer, commitPtr, &checkoutOpts)
+        }
+
+        var headRefPtr: OpaquePointer?
+        guard git_repository_head(&headRefPtr, pointer) == 0,
+              let headRef = headRefPtr else {
+            throw SwiftGitXError(code: .notFound, category: .reference,
+                                 message: "Could not resolve HEAD after force checkout.")
+        }
+        defer { git_reference_free(headRef) }
+
+        var updatedRefPtr: OpaquePointer?
+        var mutableOID = targetOID.raw
+        guard git_reference_set_target(&updatedRefPtr, headRef, &mutableOID,
+                                       "pull: Fast-forward (conflict resolved)") == 0 else {
+            throw SwiftGitXError(code: .error, category: .reference,
+                                 message: "Could not update branch reference after fast-forward.")
+        }
+        if let updated = updatedRefPtr { git_reference_free(updated) }
+    }
+
     // MARK: - Ahead / Behind
 
     /// Returns how many commits the current branch is ahead of and behind its
